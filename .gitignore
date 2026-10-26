@@ -7,3 +7,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 node_modules
+
+# pm2 日志（ecosystem.config.js 指定）
+logs/
