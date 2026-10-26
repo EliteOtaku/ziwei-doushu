@@ -42,12 +42,29 @@ DEEPSEEK_API_KEY=sk-xxx        # <通道>_API_KEY
 
 预设表见 `config.ts` 的 `PRESETS`：
 
-| 通道 | BASE_URL | MODEL |
-|---|---|---|
-| `deepseek` | `https://api.deepseek.com/v1` | `deepseek-flash` |
-| `opendesign` | `https://amr-link.open-design.ai/v1` | `deepseek-v4.1-flash` |
+| 通道 | BASE_URL | MODEL | 说明 |
+|---|---|---|---|
+| `deepseek` | `https://api.deepseek.com/v1` | `deepseek-flash` | 官方，需密钥 |
+| `opendesign` | `https://amr-link.open-design.ai/v1` | `deepseek-v4.1-flash` | 需密钥 |
+| `zcode` | `http://127.0.0.1:8081/v1` | `glm-5.3-flash` | 本地反代，**无需密钥**；协议差异见下 |
 
 新增通道不必改代码：`AI_PROVIDER=foo` + `FOO_API_KEY` / `FOO_BASE_URL` / `FOO_MODEL`。
+
+### 通道协议差异（zcode 实测，2026-10-27）
+
+预设表不只存地址，还存**该通道的协议事实**——这些差异都会让「看起来正确」的代码失败：
+
+| 事实 | 影响 | 处理位置 |
+|---|---|---|
+| 不接受 `role: 'system'`，返回 405 / `code 3012 unusual activity` | 报错完全不提 system，极难定位 | `foldSystemIntoUser()` 把 system 并入首条 user |
+| 不需要 `Authorization` | 空 Bearer 可能被拒 | `apiKey` 为空时不下发该头 |
+| `thinking:{type}` 不支持（400） | 不能用标准开关关思考 | 不上送该字段 |
+| `reasoning_effort` 接受但不生效 | 无法关闭思考阶段 | 仍上送（无害），日志告警 |
+| `max_tokens` 被忽略（设 8 也不截断） | 无法限制输出 | 仍上送（无害），日志告警 |
+| 「分多段详细分析」类不封顶要求会**只思考不产出** | 90s 内正文 0 字 | 预设自带 `outputHint`（400 字上限）|
+
+最后一条最隐蔽：同一提示词加上「总长控制在 400 字以内」后，
+90s 无输出 → 68s 完整回答（实测）。
 
 ### 调优变量
 
@@ -55,6 +72,8 @@ DEEPSEEK_API_KEY=sk-xxx        # <通道>_API_KEY
 |---|---|---|
 | `AI_MAX_TOKENS` | **不设** | 不设时不上送该字段，由上游按官方默认处理：非思考 8K、思考 64K（effort=max 时 128K）。显式设置上限 393216 |
 | `AI_IDLE_TIMEOUT_MS` | 120000 | **空闲超时**：连续这么久收不到任何字节才中断，而非限制整条流总时长 |
+| `AI_FIRST_CONTENT_TIMEOUT_MS` | 90000 | **首字正文超时**：从请求发出算起，这么久还没第一段正文就报错。思考型模型只吐 reasoning 时空闲计时器会被不断重置，必须靠这道闸兜住 |
+| `AI_OUTPUT_HINT` | 通道预设值 | 追加到末条 user 消息的输出约束，覆盖预设 |
 | `AI_REASONING_EFFORT` | 不传 | `none` / `low` / `high` / `max`；别名 `minimal`→low、`medium`/`xhigh`→high、`ultra`→max。不传时用官方默认（`high`） |
 | `AI_MAX_ATTEMPTS` | 3 | 429 / 500 / 503 的最大尝试次数（含首次） |
 | `AI_RETRY_BASE_MS` | 1000 | 指数退避基准；有 `Retry-After` 时优先用它，上限 30s |
@@ -68,8 +87,19 @@ DEEPSEEK_API_KEY=sk-xxx        # <通道>_API_KEY
 4. **错误码语义**（[官方文档](https://api-docs.deepseek.com/zh-cn/quick_start/error_codes)）：400 格式错误 / 401 认证失败 / 402 余额不足 / 422 参数错误 / 429 速率上限 / 500 服务器故障 / 503 服务器繁忙。其中 **429 / 500 / 503 是瞬时错误**，应退避重试；其余重试无意义，直接报给用户。
 5. **超时用空闲超时**。思考模式生成长文可能跑几分钟，固定总时长会误杀正常请求；"连续 N 秒无字节"才是挂死信号。
 6. **`stream_options.include_usage`**：官方在最后一帧返回 usage，此时 `choices` 为空数组，不能因 `choices[0]` 不存在就跳过。
+7. **首个正文 token 之前必须冲刷响应头**。ReadableStream 要等到第一次 enqueue 才发 headers；思考型模型可能 30s+ 才吐第一个正文 token，不先发一帧 SSE 注释，浏览器会一直停在「等响应头」，表现为「点了没反应」。
 
-## 已修复的客户端缺陷
+## 已修复的缺陷
+
+**服务端：首字之前零字节**
+
+`streamAIResponse` 早期只在拿到 `chunk.text` 时才 enqueue。思考型模型先连吐几十秒 `reasoning_content`，这期间：
+- 响应头未发出 → 浏览器 fetch 停在 pending，UI 显示「生成中…」毫无进展
+- 空闲超时被 reasoning 帧不断重置 → 永不触发
+
+现于流启动时立即下发 `: connected` 注释帧，并每 10s 发一次心跳；同时新增 `AI_FIRST_CONTENT_TIMEOUT_MS` 独立闸门，到点给出可操作错误而非无限等待。
+
+**客户端：按网络分片切行**
 
 原先 `ChatPanel`、`InsightPanel`、`heming/page` 三处各自内联同一段解析：
 

@@ -71,6 +71,49 @@ export interface StreamChunk {
 /** 官方文档明确的瞬时错误码，值得退避重试 */
 const RETRYABLE_STATUS = new Set([429, 500, 503]);
 
+/**
+ * 把 system 消息折叠进第一条 user 消息。
+ *
+ * 为什么需要：多数 OpenAI 兼容服务接受 `role: 'system'`，但并非全部。
+ * 本地 Zcode 反代的 GLM 通道实测会以 405 / code 3012（unusual activity）
+ * 直接拒绝含 system 的请求 —— 报错信息完全不提 system，极难从表象定位。
+ *
+ * 折叠而不是丢弃：system 里放的是命理口径与输出格式要求，
+ * 丢了会让回答风格跑偏。合并成 `{system}\n\n---\n\n{user}` 的形态，
+ * 语义上等价于「先交代背景，再提问」。
+ *
+ * 多条 system 按顺序拼接；若没有 user 消息（理论上不会发生），
+ * 则把文本作为唯一的 user 消息发出去，避免出现空 messages。
+ */
+function foldSystemIntoUser(messages: ChatMessage[]): ChatMessage[] {
+  const systemTexts: string[] = [];
+  const rest: ChatMessage[] = [];
+
+  for (const m of messages) {
+    if (m.role === 'system') {
+      if (m.content.trim()) systemTexts.push(m.content);
+    } else {
+      rest.push(m);
+    }
+  }
+
+  if (systemTexts.length === 0) return messages;
+
+  const preamble = systemTexts.join('\n\n');
+  const firstUserIndex = rest.findIndex(m => m.role === 'user');
+  if (firstUserIndex === -1) {
+    return [{ role: 'user', content: preamble }, ...rest];
+  }
+
+  const merged: ChatMessage[] = [...rest];
+  const target = merged[firstUserIndex];
+  merged[firstUserIndex] = {
+    role: 'user',
+    content: `${preamble}\n\n---\n\n${target.content}`,
+  };
+  return merged;
+}
+
 /** 官方错误码 → 面向用户的中文说明 + 可操作建议 */
 function describeStatus(status: number, detail: string): string {
   const tail = detail ? `（上游原文：${detail}）` : '';
@@ -159,9 +202,28 @@ export async function* streamChat(
   messages: ChatMessage[],
   outerSignal?: AbortSignal,
 ): AsyncGenerator<StreamChunk, void, unknown> {
+  // 通道不接受 system role 时（如本地 GLM 反代）折叠进第一条 user 消息。
+  // 这一步必须发生在组装 body 之前，否则上送的就是被上游拒绝的原始结构。
+  const baseMessages = config.supportsSystemRole ? messages : foldSystemIntoUser(messages);
+
+  // 通道级输出约束：追加到**最后一条 user 消息**末尾，作为最近、最强的指令。
+  // 放在末尾而不是开头，是因为模型的注意力更靠后，且不会冲淡产品提示词。
+  let wireMessages = baseMessages;
+  if (config.outputHint) {
+    const lastUser = [...baseMessages].reverse().findIndex(m => m.role === 'user');
+    if (lastUser !== -1) {
+      const idx = baseMessages.length - 1 - lastUser;
+      wireMessages = [...baseMessages];
+      wireMessages[idx] = {
+        role: 'user',
+        content: `${wireMessages[idx].content}\n\n${config.outputHint}`,
+      };
+    }
+  }
+
   const body: Record<string, unknown> = {
     model: config.model,
-    messages,
+    messages: wireMessages,
     stream: true,
   };
   // 关键：只有显式配置才上送 max_tokens，否则交给上游按模式取默认（思考 64K）
@@ -174,6 +236,8 @@ export async function* streamChat(
 
   while (true) {
     attempt += 1;
+    // 每次尝试各自计时：首字正文超时应从本次请求发出算起
+    const requestStart = Date.now();
     const controller = new AbortController();
     const onOuterAbort = () => controller.abort();
     outerSignal?.addEventListener('abort', onOuterAbort, { once: true });
@@ -194,13 +258,16 @@ export async function* streamChat(
 
       let response: Response;
       try {
+        // 本地免鉴权通道不下发 Authorization：某些反代对空的 Bearer 会返回 401
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        };
+        if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+
         response = await fetch(`${config.baseUrl}/chat/completions`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${config.apiKey}`,
-            Accept: 'text/event-stream',
-          },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -305,6 +372,15 @@ export async function* streamChat(
 
             const reasoning = delta.reasoning_content;
             if (typeof reasoning === 'string' && reasoning) {
+              // 首字正文超时：思考型模型会长时间只吐 reasoning，空闲计时器被不断重置，
+              // 连接看似正常但用户什么都看不到。到点主动放弃，给一条可操作的错误。
+              if (!emitted && Date.now() - requestStart > config.firstContentTimeoutMs) {
+                throw new AIError(
+                  `模型持续思考 ${Math.round(config.firstContentTimeoutMs / 1000)} 秒仍未输出正文，已中断。` +
+                    '可能是提问要求的输出结构过于复杂。请把问题拆小（例如只问一个宫位或一个主题）后重试。',
+                  504,
+                );
+              }
               yield { reasoning };
             }
 
@@ -324,7 +400,6 @@ export async function* streamChat(
       if (usage || finishReason) {
         yield { meta: { usage, finishReason } };
       }
-
       if (finishReason === 'length') {
         throw new AIError(
           '回答因达到长度上限被截断。如需完整回答，请调大 AI_MAX_TOKENS（上限 393216）或改用更具体的问题',

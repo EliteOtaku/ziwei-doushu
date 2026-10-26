@@ -60,18 +60,40 @@ export function streamAIResponse(config: AIConfig, messages: ChatMessage[]): Res
       };
 
       try {
-        for await (const chunk of streamChat(config, messages)) {
-          if (chunk.text) {
-            send({ delta: { text: chunk.text } });
+        // 立刻发一帧 SSE 注释，作用有两个：
+        //   1. 冲刷响应头。ReadableStream 要等到第一次 enqueue 才会把 headers 发出去，
+        //      而思考型模型可能几十秒才吐第一个正文 token —— 不先 flush，
+        //      浏览器端 fetch 会一直停在等响应头，看起来像「点了没反应」。
+        //   2. 让前端立刻知道请求已受理。
+        // 注释帧以 ':' 开头，标准的 SSE 客户端与我们的 consumeSSE 都会跳过。
+        controller.enqueue(encoder.encode(': connected\n\n'));
+
+        // 之后每 10s 发一次心跳，避免中间层（Nginx / CDN / 反代）因长时间无数据断连。
+        const heartbeat = setInterval(() => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(': keep-alive\n\n'));
+          } catch {
+            /* 流已关闭，忽略 */
           }
-          // reasoning 增量刻意不转发：前端没有「思考过程」的展示位，
-          // 混进正文会让用户以为模型在自说自话。
-          if (chunk.meta && (chunk.meta.usage || chunk.meta.finishReason)) {
-            const meta: StreamMeta = chunk.meta;
-            send({ meta });
+        }, 10_000);
+
+        try {
+          for await (const chunk of streamChat(config, messages)) {
+            if (chunk.text) {
+              send({ delta: { text: chunk.text } });
+            }
+            // reasoning 增量刻意不转发：前端没有「思考过程」的展示位，
+            // 混进正文会让用户以为模型在自说自话。
+            if (chunk.meta && (chunk.meta.usage || chunk.meta.finishReason)) {
+              const meta: StreamMeta = chunk.meta;
+              send({ meta });
+            }
           }
+          finish();
+        } finally {
+          clearInterval(heartbeat);
         }
-        finish();
       } catch (e) {
         const isAI = e instanceof AIError;
         const message = isAI
