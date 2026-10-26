@@ -258,7 +258,10 @@
 | https://raw.githubusercontent.com/EliteOtaku/ziwei-doushu/main/docs/ai-enhancement-plan.md | 完整工程方案与实测数据 |
 
 语料示例（想看原话长什么样）：
-https://raw.githubusercontent.com/EliteOtaku/ziwei-doushu/main/docs/tianji-ziwei/10上.md
+https://raw.githubusercontent.com/EliteOtaku/ziwei-doushu/main/docs/tianji-ziwei/10%E4%B8%8A.md
+
+> 注意：语料文件名含中文，**必须用上面这个 URL 编码后的链接**，未编码的原始中文路径会返回 404。
+> 若想浏览整个语料目录，用：https://github.com/EliteOtaku/ziwei-doushu/tree/main/docs/tianji-ziwei
 
 ---
 
