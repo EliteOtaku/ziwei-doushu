@@ -289,7 +289,35 @@ npm test            # 排盘引擎回归（768 盘 × 紫微铁律、夏令时�
 
 每次 push 与 PR 都会在 GitHub Actions 上跑同一套（见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）。
 
-> **注意：开源版不含后端 API 路由。**排盘、命盘展示、合盘起盘都在浏览器里用本仓库的引擎完成，**不需要任何 API Key**。AI 解读（`/api/interpret`）和合盘 AI 分析（`/api/heming`）需要你自己实现接口；没实现之前，这两处会直接提示「开源版不含该接口」，配置 API Key 也不会变成可用（#30 就是这个原因）。
+> **注意：开源版原本不含后端 API 路由。** 排盘、命盘展示、合盘起盘都在浏览器里用本仓库的引擎完成，**不需要任何 API Key**。
+>
+> 本 fork 已补齐 `/api/interpret` 与 `/api/heming` 两个路由（见 [lib/ai/](./lib/ai/)），走 OpenAI 兼容协议，任何兼容服务都能接。**不配置密钥时，页面仍可正常排盘、看盘，只在点"AI 解读/合盘分析"时提示未配置**，不会影响其他功能。
+
+### 3.1 启用 AI 解读
+
+```bash
+cp .env.example .env.local
+```
+
+编辑 `.env.local`，按你要用的通道填一组：
+
+```ini
+# 方案 A：DeepSeek 官方
+AI_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-xxxx
+
+# 方案 B：OpenDesign（有订阅时）
+AI_PROVIDER=opendesign
+OPENDESIGN_API_KEY=xxxx
+
+# 方案 C：任意 OpenAI 兼容服务（本地 Ollama / one-api / 自建网关等）
+AI_PROVIDER=mygateway
+MYGATEWAY_API_KEY=xxxx
+MYGATEWAY_BASE_URL=https://your-host/v1
+MYGATEWAY_MODEL=your-model
+```
+
+改完重启服务。原理与调参见 [lib/ai/README.md](./lib/ai/README.md)。
 
 ---
 
@@ -376,10 +404,10 @@ npm test            # 排盘引擎回归（768 盘 × 紫微铁律、夏令时�
 
 | | 内容 |
 |---|---|
-| ✅ **开源** | 排盘引擎（`lib/ziwei/`）、古籍公版原文（`lib/classics/`）、SEO 知识图谱（`lib/seo/`）、Demo 界面、51.8 万样本数据集、13 维解读数据集 v4.0 |
-| ❌ **不开源** | 断语库（`lib/ziwei/db-analysis.ts` 是占位，线上是上万行的 13 主题断语）、AI 解读 prompt、后端 API（`/api/interpret` 等）、用户系统（登录 / 会员 / 支付）、服务端安全（签名、防刷、水印）、部署配置 |
+| ✅ **开源** | 排盘引擎（`lib/ziwei/`）、古籍公版原文（`lib/classics/`）、SEO 知识图谱（`lib/seo/`）、Demo 界面、51.8 万样本数据集、13 维解读数据集 v4.0、**本 fork 补齐的 AI 接口层（`lib/ai/` + `app/api/`）** |
+| ❌ **不开源** | 断语库（`lib/ziwei/db-analysis.ts` 是占位，线上是上万行的 13 主题断语）、用户系统（登录 / 会员 / 支付）、服务端安全（签名、防刷、水印）、部署配置 |
 
-如果你需要 AI 解读能力，可以参考 `lib/ziwei/patterns.ts` 和 `heming-knowledge.ts` 里的知识库，结合任意 LLM 自行构建 prompt。
+上游原版不含 AI 接口。本 fork 按公开的 `ZiweiChart` 数据结构自己写了一版：命盘序列化、倪海厦体系提示词、OpenAI 兼容流式客户端，见 [lib/ai/](./lib/ai/)。`lib/ziwei/patterns.ts` 与 `heming-knowledge.ts` 的知识库被直接喂给模型，不需要另建断语库。
 
 ---
 
