@@ -188,6 +188,12 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [activeTopic, setActiveTopic] = useState<string>('overview');
+  /**
+   * 已等待秒数。思考型模型（如免费 GLM 通道）首段正文要 30-60 秒，
+   * 这期间面板里只有一条空的 assistant 消息 —— 看起来就像「这里什么都没有」。
+   * 用它渲染明确的等待状态，否则用户会以为 AI 功能不存在。
+   */
+  const [waitSecs, setWaitSecs] = useState(0);
   const messagesRef = useRef<Message[]>([]); // always-current copy for closures
   const loadingRef = useRef(false);
   const autoLoaded = useRef(false);
@@ -205,6 +211,21 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // 是否正在等第一段正文（最后一条是空的 assistant 消息且仍在加载）
+  const lastMsg = messages[messages.length - 1];
+  const waitingFirstToken = loading && lastMsg?.role === 'assistant' && !lastMsg.content;
+
+  // 计时器：只在等待首字期间跑，出字后自动停
+  useEffect(() => {
+    if (!waitingFirstToken) {
+      setWaitSecs(0);
+      return;
+    }
+    const started = Date.now();
+    const t = setInterval(() => setWaitSecs(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [waitingFirstToken]);
 
   // Auto-generate 命格总览 on mount
   useEffect(() => {
@@ -433,7 +454,27 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                   <span style={{ color: 'var(--t-gold)', opacity: 0.4 }}>✦</span>
                   命理解读
                 </div>
-                <AiContent text={msg.content} streaming={loading && isLastMsg} />
+                {isLastMsg && loading && !msg.content ? (
+                  // 首字之前的等待态：必须给出可见反馈，否则面板看起来是空的
+                  <div className="flex flex-col gap-2 py-1">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="inline-block w-1.5 h-1.5 rounded-full animate-pulse"
+                        style={{ background: 'var(--t-gold)', opacity: 0.7 }}
+                      />
+                      <span className="text-[11px]" style={{ color: 'var(--t-text2)' }}>
+                        AI 正在思考并撰写…
+                        {waitSecs > 0 && ` 已 ${waitSecs} 秒`}
+                      </span>
+                    </div>
+                    <p className="text-[10px] leading-relaxed" style={{ color: 'var(--t-faint)' }}>
+                      当前通道模型较慢，通常需要 30–60 秒才开始出字，请稍候。
+                      {waitSecs > 100 && ' 若超过 2 分钟仍无内容，会自动提示失败原因。'}
+                    </p>
+                  </div>
+                ) : (
+                  <AiContent text={msg.content} streaming={loading && isLastMsg} />
+                )}
               </motion.div>
             );
           })}

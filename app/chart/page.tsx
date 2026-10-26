@@ -28,10 +28,27 @@ export default function ChartPage() {
     return (
       <main style={{ maxWidth: 720, margin: '0 auto', padding: '48px 20px' }}>
         <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>紫微斗数排盘</h1>
-        <p style={{ color: '#888', marginBottom: 32, fontSize: 14, lineHeight: 1.7 }}>
-          输入出生年月日时，开源排盘引擎即时生成命盘。
+        <p style={{ color: '#888', marginBottom: 12, fontSize: 14, lineHeight: 1.7 }}>
+          输入出生年月日时，排盘引擎即时生成命盘。
+        </p>
+        <p
+          style={{
+            color: '#a8894a',
+            marginBottom: 32,
+            fontSize: 13,
+            lineHeight: 1.8,
+            padding: '10px 14px',
+            border: '1px solid rgba(212,168,67,0.25)',
+            borderRadius: 8,
+            background: 'rgba(212,168,67,0.06)',
+          }}
+        >
+          <strong>起盘后右侧会出现「AI 命理解读」面板</strong>
+          ：自动生成命格总览，可切换感情 / 事业 / 财运 / 健康 / 性格，也能直接在输入框追问。
           <br />
-          （本页为引擎 Demo，完整商业版界面不在开源范围；排盘内核完全开放。）
+          <span style={{ opacity: 0.75 }}>
+            首次出字需要等 30–60 秒（模型思考阶段），期间面板会显示倒计时。
+          </span>
         </p>
         <BirthForm onSubmit={(info: BirthInfo) => setChart(generateChart(info))} />
       </main>
