@@ -1,21 +1,42 @@
 /**
- * lib/ai/openai-compat —— 最小可用的 OpenAI 兼容流式客户端
+ * lib/ai/openai-compat —— OpenAI 兼容流式客户端（以 DeepSeek 官方规范为准）
  *
- * 只做一件事：把 /chat/completions 的 SSE 流拆成纯文本增量吐出来。
+ * 职责边界：只负责「把 /chat/completions 的 SSE 流拆成事件」，
+ * 不理解紫微斗数、不拼 system prompt、不决定 HTTP 响应形状。
  *
- * 为什么自己写而不装 SDK：
- *   协议本身只有「POST 一个 JSON、按行读 data:」两步，用 fetch 就够；
- *   现有依赖里 @anthropic-ai/sdk 是另一套协议，openai 包没必要为一层 while 循环引入。
+ * 为什么自己写而不装 openai SDK：
+ *   协议本身是「POST 一个 JSON、按行读 data:」，用 fetch 足够；
+ *   为一层 while 循环引入一个 SDK 及它的版本演进成本不划算。
  *
- * 两个必须处理的上游差异（实测踩过）：
- *   1. 推理模型（deepseek 系、hy、glm-flash 等）的 delta 里会同时出现
- *      reasoning_content 和 content。reasoning_content 是思考过程，不能拼进答案，
- *      否则前端会把「先想一遍」也显示给用户。这里只取 content。
- *   2. 推理模型的思考会吃掉 max_tokens 预算，预算给小了会出现
- *      「流正常结束但 content 一个字都没有」。这种情况抛出明确错误，
- *      而不是让前端显示一条空白消息。
+ * 官方规范中必须处理、且极易踩错的六件事：
+ *
+ *   1. reasoning_content 与 content 是**两个字段**。
+ *      思考模式下 delta 先连续吐 reasoning_content（思考过程），再吐 content（正式回答）。
+ *      只能取 content，否则前端会把「先想一遍」也当答案显示。
+ *
+ *   2. max_tokens 不传 ≠ 8K。
+ *      官方：非思考默认 8K，思考默认 64K，effort=max 时 128K。
+ *      硬编码一个偏小的值会让思考吃光预算、content 为空串。
+ *      所以 config 层默认不设，只在用户显式配置时才上送。
+ *
+ *   3. finish_reason 必须检查。
+ *      length = 被 max_tokens 截断；insufficient_system_resource = 推理资源不足中断。
+ *      这两种都是「回答不完整」，不能当成功返回，否则用户看到半句话却不知道为何断了。
+ *
+ *   4. 错误码语义（官方 https://api-docs.deepseek.com/zh-cn/quick_start/error_codes）：
+ *      400 格式错误 / 401 认证失败 / 402 余额不足 / 422 参数错误
+ *      429 速率上限 / 500 服务器故障 / 503 服务器繁忙
+ *      其中 429 / 500 / 503 是**瞬时**的，应退避重试；其余重试无意义，直接报给用户。
+ *
+ *   5. 超时应该是**空闲超时**而非总时长。
+ *      思考模式生成长文可能跑几分钟，用固定总时长会误杀正常请求；
+ *      而「连续 N 秒收不到任何字节」才是真正的挂死信号。
+ *
+ *   6. stream_options.include_usage 让最后一帧带 token 统计。
+ *      官方在 usage 帧里 choices 为空数组，只带 usage，不能因 choices[0] 不存在就跳过。
  */
 
+import { AIError } from './errors';
 import type { AIConfig } from './config';
 
 export interface ChatMessage {
@@ -23,134 +44,310 @@ export interface ChatMessage {
   content: string;
 }
 
-export class AIError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly detail?: string,
-  ) {
-    super(message);
-    this.name = 'AIError';
+/** 上游返回的 token 统计 */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** 其中思考部分消耗的 token（官方在 completion_tokens_details 里给出） */
+  reasoningTokens?: number;
+  totalTokens: number;
+}
+
+/** 一次流式调用的完整结果元信息，供调用方记录或透传 */
+export interface StreamMeta {
+  usage?: TokenUsage;
+  finishReason?: string;
+}
+
+export interface StreamChunk {
+  /** 正文增量 */
+  text?: string;
+  /** 思考过程增量（默认不转发给前端，但保留以便将来做「思考中」提示） */
+  reasoning?: string;
+  /** 该帧携带的元信息（通常是最后一帧） */
+  meta?: StreamMeta;
+}
+
+/** 官方文档明确的瞬时错误码，值得退避重试 */
+const RETRYABLE_STATUS = new Set([429, 500, 503]);
+
+/** 官方错误码 → 面向用户的中文说明 + 可操作建议 */
+function describeStatus(status: number, detail: string): string {
+  const tail = detail ? `（上游原文：${detail}）` : '';
+  switch (status) {
+    case 400:
+      return `请求格式错误，请检查命盘数据是否完整${tail}`;
+    case 401:
+      return `API Key 认证失败，请核对 .env.local 中的密钥是否正确、是否已失效${tail}`;
+    case 402:
+      return `账户余额不足，请前往 DeepSeek 开放平台充值后重试${tail}`;
+    case 422:
+      return `请求参数非法，通常是模型名或 max_tokens 等取值不被支持${tail}`;
+    case 429:
+      return `请求速率或并发达到上限，已自动重试仍失败，请稍后再试${tail}`;
+    case 500:
+      return `AI 服务内部故障，已自动重试仍失败，请稍后再试${tail}`;
+    case 503:
+      return `AI 服务负载过高，已自动重试仍失败，请稍后再试${tail}`;
+    default:
+      return `AI 服务返回错误 ${status}${tail}`;
   }
 }
 
-/** 从上游错误响应里尽量抽出人类可读的原因 */
+/** 从上游错误响应里抽出人类可读的原因 */
 async function readErrorDetail(res: Response): Promise<string> {
   try {
     const text = await res.text();
     if (!text) return '';
     try {
-      const j = JSON.parse(text);
+      const j = JSON.parse(text) as { error?: { message?: unknown }; message?: unknown };
       const msg = j?.error?.message ?? j?.message;
       if (typeof msg === 'string') return msg;
     } catch {
       /* 非 JSON，原样截断返回 */
     }
-    return text.slice(0, 500);
+    return text.slice(0, 300);
   } catch {
     return '';
   }
 }
 
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new AIError('请求已取消', 499));
+    const t = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new AIError('请求已取消', 499));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** 解析一帧 JSON 里的 usage，字段缺失时返回 undefined 而不是假零 */
+function parseUsage(raw: unknown): TokenUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const u = raw as Record<string, unknown>;
+  const prompt = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : undefined;
+  const completion = typeof u.completion_tokens === 'number' ? u.completion_tokens : undefined;
+  const total = typeof u.total_tokens === 'number' ? u.total_tokens : undefined;
+  if (prompt === undefined && completion === undefined && total === undefined) return undefined;
+
+  const details = u.completion_tokens_details as Record<string, unknown> | undefined;
+  const reasoning =
+    details && typeof details.reasoning_tokens === 'number' ? details.reasoning_tokens : undefined;
+
+  return {
+    promptTokens: prompt ?? 0,
+    completionTokens: completion ?? 0,
+    ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
+    totalTokens: total ?? (prompt ?? 0) + (completion ?? 0),
+  };
+}
+
 /**
- * 调用 OpenAI 兼容接口并以异步生成器返回文本增量。
+ * 发起一次流式请求（含瞬时错误重试），逐帧产出增量。
  *
- * 超时用 AbortController 控制整条流：推理模型首 token 可能几秒到十几秒，
- * 但总时长必须有上限，否则上游静默挂死会把 fetch 永久占住。
+ * 重试只覆盖「还没吐出任何正文」的阶段：
+ * 一旦已经开始 yield 内容，再重试会让用户看到重复片段，所以直接抛错。
  */
 export async function* streamChat(
   config: AIConfig,
   messages: ChatMessage[],
-): AsyncGenerator<string, void, unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  outerSignal?: AbortSignal,
+): AsyncGenerator<StreamChunk, void, unknown> {
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages,
+    stream: true,
+  };
+  // 关键：只有显式配置才上送 max_tokens，否则交给上游按模式取默认（思考 64K）
+  if (config.maxTokens !== undefined) body.max_tokens = config.maxTokens;
+  if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
+  if (config.includeUsage) body.stream_options = { include_usage: true };
 
-  let response: Response;
-  try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        stream: true,
-        max_tokens: config.maxTokens,
-        // OpenDesign 端点只认 reasoning_effort；不需要思考时设 none 可省 90% token
-        ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
-      }),
-      signal: controller.signal,
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    if (e instanceof Error && e.name === 'AbortError') {
-      throw new AIError('上游响应超时', 504);
-    }
-    throw new AIError(`无法连接 AI 服务：${e instanceof Error ? e.message : String(e)}`, 502);
-  }
-
-  if (!response.ok) {
-    const detail = await readErrorDetail(response);
-    clearTimeout(timer);
-    throw new AIError(`AI 服务返回 ${response.status}`, response.status, detail);
-  }
-  if (!response.body) {
-    clearTimeout(timer);
-    throw new AIError('AI 服务未返回响应流', 502);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  let attempt = 0;
   let emitted = false;
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+  while (true) {
+    attempt += 1;
+    const controller = new AbortController();
+    const onOuterAbort = () => controller.abort();
+    outerSignal?.addEventListener('abort', onOuterAbort, { once: true });
 
-      buffer += decoder.decode(value, { stream: true });
+    // 空闲超时：每收到一帧就重置。挂死 ≠ 跑得慢。
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, config.idleTimeoutMs);
+    };
 
-      // 按行切；最后一段可能不完整，留在 buffer 里等下次
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '');
-        buffer = buffer.slice(newlineIndex + 1);
+    try {
+      resetIdle();
 
-        if (!line.startsWith('data:')) continue; // 空行、注释、event: 行都跳过
-        const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-
-        let chunk: unknown;
-        try {
-          chunk = JSON.parse(payload);
-        } catch {
-          continue; // 半截 JSON 或心跳噪声
+      let response: Response;
+      try {
+        response = await fetch(`${config.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.apiKey}`,
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') {
+          throw new AIError(
+            timedOut
+              ? `AI 服务 ${Math.round(config.idleTimeoutMs / 1000)} 秒无任何响应，已中断`
+              : '请求已取消',
+            timedOut ? 504 : 499,
+          );
         }
-
-        const delta = (chunk as { choices?: { delta?: Record<string, unknown> }[] })
-          ?.choices?.[0]?.delta;
-        if (!delta) continue;
-
-        const text = delta.content;
-        if (typeof text === 'string' && text.length > 0) {
-          emitted = true;
-          yield text;
+        // 网络层失败（DNS / 连接被拒 / TLS），可重试
+        if (attempt < config.maxAttempts && !emitted) {
+          await sleep(config.retryBaseMs * 2 ** (attempt - 1), controller.signal);
+          continue;
         }
-        // delta.reasoning_content 是思考过程，刻意丢弃
+        throw new AIError(
+          `无法连接 AI 服务：${e instanceof Error ? e.message : String(e)}`,
+          502,
+        );
       }
-    }
-  } finally {
-    clearTimeout(timer);
-    reader.releaseLock?.();
-  }
 
-  if (!emitted) {
-    throw new AIError(
-      '模型返回了空内容。推理模型会先消耗 max_tokens 做思考，请调大 AI_MAX_TOKENS（当前上限见配置）',
-      502,
-    );
+      if (!response.ok) {
+        const detail = await readErrorDetail(response);
+        const err = new AIError(describeStatus(response.status, detail), response.status, detail);
+
+        if (RETRYABLE_STATUS.has(response.status) && attempt < config.maxAttempts && !emitted) {
+          const wait = config.retryBaseMs * 2 ** (attempt - 1);
+          // Retry-After 优先于退避算法
+          const retryAfter = Number(response.headers.get('retry-after'));
+          const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : wait;
+          if (idleTimer) clearTimeout(idleTimer);
+          outerSignal?.removeEventListener('abort', onOuterAbort);
+          await sleep(Math.min(delay, 30_000), controller.signal);
+          continue;
+        }
+        throw err;
+      }
+
+      if (!response.body) {
+        throw new AIError('AI 服务未返回响应流', 502);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finishReason: string | undefined;
+      let usage: TokenUsage | undefined;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          resetIdle();
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // 按行切；最后一段可能不完整，留在 buffer 等下一片。
+          // 必须用 \n 切而不是按网络分片切 —— 分片边界会落在 JSON 中间。
+          let nl: number;
+          while ((nl = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, nl).replace(/\r$/, '');
+            buffer = buffer.slice(nl + 1);
+
+            if (!line || line.startsWith(':')) continue; // 空行 / SSE 注释心跳
+            if (!line.startsWith('data:')) continue; // event: / id: / retry: 一律跳过
+            const payload = line.slice(5).trim();
+            if (payload === '[DONE]') continue;
+
+            let chunk: Record<string, unknown>;
+            try {
+              chunk = JSON.parse(payload) as Record<string, unknown>;
+            } catch {
+              continue; // 心跳噪声或上游偶发非 JSON 行
+            }
+
+            // usage 帧：官方在最后一帧返回，此时 choices 为空数组
+            const u = parseUsage(chunk.usage);
+            if (u) usage = u;
+
+            // 流内错误对象（部分中转站用它代替 HTTP 状态码）
+            const inlineErr = chunk.error as { message?: unknown; code?: unknown } | undefined;
+            if (inlineErr) {
+              const msg =
+                typeof inlineErr.message === 'string' ? inlineErr.message : '上游在流中返回错误';
+              throw new AIError(msg, 502);
+            }
+
+            const choices = chunk.choices as
+              | { delta?: Record<string, unknown>; finish_reason?: unknown }[]
+              | undefined;
+            const choice = choices?.[0];
+            if (!choice) continue;
+
+            if (typeof choice.finish_reason === 'string') {
+              finishReason = choice.finish_reason;
+            }
+
+            const delta = choice.delta;
+            if (!delta) continue;
+
+            const reasoning = delta.reasoning_content;
+            if (typeof reasoning === 'string' && reasoning) {
+              yield { reasoning };
+            }
+
+            const text = delta.content;
+            if (typeof text === 'string' && text) {
+              emitted = true;
+              yield { text };
+            }
+          }
+        }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+        reader.releaseLock?.();
+      }
+
+      // 流正常结束：检查是否被截断
+      if (usage || finishReason) {
+        yield { meta: { usage, finishReason } };
+      }
+
+      if (finishReason === 'length') {
+        throw new AIError(
+          '回答因达到长度上限被截断。如需完整回答，请调大 AI_MAX_TOKENS（上限 393216）或改用更具体的问题',
+          502,
+        );
+      }
+      if (finishReason === 'insufficient_system_resource') {
+        throw new AIError('推理资源不足，回答被中断，请重试', 503);
+      }
+
+      if (!emitted) {
+        // 思考模式吃光预算的典型症状：流正常结束但正文一个字都没有
+        throw new AIError(
+          '模型没有返回正文内容。若启用了思考模式，可能是 max_tokens 过小导致思考占满预算，' +
+            '请调大 AI_MAX_TOKENS（上限 393216），或把 AI_REASONING_EFFORT 设为 none',
+          502,
+        );
+      }
+
+      return;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      outerSignal?.removeEventListener('abort', onOuterAbort);
+    }
   }
 }

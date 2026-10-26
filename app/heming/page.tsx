@@ -6,6 +6,7 @@ import { formToBirthInfo } from '@/lib/ziwei/share';
 import { generateChart as buildChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart } from '@/lib/ziwei/types';
 import { useTheme } from '@/components/ThemeProvider';
+import { consumeSSE, readErrorResponse } from '@/lib/ai/sse-client';
 
 // ─── AiContent 渲染器（与 InsightPanel 一致）────────────────
 function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -64,6 +65,8 @@ export default function HemingPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [question, setQuestion] = useState('');
   const [analysisError, setAnalysisError] = useState(false);
+  // 具体错误原因（面向用户），为空时回退到通用文案
+  const [errorMessage, setErrorMessage] = useState('');
   // 开源版不含 /api/heming：接口 404 时单独说明，而不是让用户反复重试
   const [apiMissing, setApiMissing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -93,6 +96,7 @@ export default function HemingPage() {
     setAnalyzing(true);
     setAnalysis('');
     setAnalysisError(false);
+    setErrorMessage('');
 
     try {
       // 并行起两张盘（如果还没起）
@@ -105,6 +109,7 @@ export default function HemingPage() {
       cA = newA;
       cB = newB;
       if (!cA || !cB) {
+        setErrorMessage('命盘生成失败，请检查出生信息是否有效');
         setAnalysisError(true);
         setAnalyzing(false);
         return;
@@ -117,31 +122,36 @@ export default function HemingPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chartA: cA, chartB: cB, question: q ?? undefined }),
       });
-      if (res.status === 404) { setApiMissing(true); throw new Error('api-missing'); }
-      if (!res.ok || !res.body) throw new Error();
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let text = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') break;
-          try {
-            const delta = JSON.parse(data).delta?.text ?? '';
-            text += delta;
-            setAnalysis(text);
-          } catch { /* skip */ }
-        }
+      if (res.status === 404) {
+        setApiMissing(true);
+        setErrorMessage('接口不存在（/api/heming 未实现）');
+        setAnalysisError(true);
+        return;
       }
+      if (!res.ok) {
+        const err = await readErrorResponse(res);
+        setErrorMessage(err.message);
+        setAnalysisError(true);
+        return;
+      }
+
+      let text = '';
+      await consumeSSE(res, {
+        onDelta: delta => {
+          text += delta;
+          setAnalysis(text);
+        },
+        onError: err => {
+          // 保留已收到的正文，把错误原因附在后面
+          setErrorMessage(err.message);
+          setAnalysisError(true);
+        },
+      });
+
       // scroll to analysis
       setTimeout(() => analysisRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
-    } catch {
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? `网络请求失败：${e.message}` : '分析失败，请重试');
       setAnalysisError(true);
     } finally {
       setAnalyzing(false);
@@ -285,8 +295,8 @@ export default function HemingPage() {
           {analysisError && (
             <div style={{ padding: '12px 16px', borderRadius: '10px', border: '1px solid var(--bdr)', background: 'var(--bg-card)', fontSize: '13px', color: 'var(--tx-2)', marginTop: '12px' }}>
               {apiMissing
-                ? '开源版不含合盘 AI 分析接口（/api/heming），需要你自己实现后才能用。两人的命盘可以分别到「排盘」页（/chart）查看。'
-                : '分析暂时不可用，请重试。'}
+                ? '合盘 AI 分析接口（/api/heming）不存在。两人的命盘可以分别到「排盘」页（/chart）查看。'
+                : errorMessage || '分析暂时不可用，请重试。'}
             </div>
           )}
         </div>

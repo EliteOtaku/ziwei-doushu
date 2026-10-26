@@ -1,18 +1,24 @@
 /**
- * lib/ai/sse —— 把异步文本流包成前端约定的 SSE 响应
+ * lib/ai/sse —— 服务端：把 AI 流包装成前端约定的 SSE 响应
  *
- * 前端（components/ChatPanel.tsx、components/InsightPanel.tsx、app/heming/page.tsx）
- * 的解析逻辑固定为：
- *   逐行看是否以 "data: " 开头，去掉前缀后若是 "[DONE]" 结束，
- *   否则 JSON.parse 并取 .delta.text 拼接。
- * 所以这里必须严格产出该格式，且每帧以空行分隔。
+ * 帧类型（前端 lib/ai/sse-client.ts 与之对应，两边必须同步改）：
+ *   data: {"delta":{"text":"..."}}                       正文增量
+ *   data: {"error":{"message":"...","status":N}}          流中途出错（HTTP 已 200，无法改状态码）
+ *   data: {"meta":{"usage":{...},"finishReason":"stop"}} 结束元信息（可选）
+ *   data: [DONE]                                          流结束哨兵
  *
- * 一个容易踩的坑：前端是按 \n 切分并逐行 parse 的，
- * 如果 JSON 里含有真实换行符，会把一帧拆成多行、导致 JSON.parse 失败而被静默丢弃，
- * 表现就是「回复里整段内容突然消失」。JSON.stringify 会把 \n 转义成 \\n，天然安全。
+ * 为什么流内错误要单独一帧：
+ *   一旦写出第一个字节，HTTP 状态码就锁定为 200 了，无法再回 5xx。
+ *   早期实现只写 {"error":"文本"}，而前端三种消费者都只读 parsed.delta.text，
+ *   于是错误被静默吞掉，用户只看到一个空白气泡 —— 这是必须修的缺陷。
+ *   现在用嵌套的 error.message 结构，前端能明确识别并展示。
+ *
+ * 另一个坑：前端按行解析，JSON 里若有真实换行会把一帧拆成多行导致 parse 失败。
+ * JSON.stringify 会把 \n 转义成 \\n，天然安全，不要手工拼 JSON。
  */
 
-import { AIError, streamChat, type ChatMessage } from './openai-compat';
+import { AIError } from './errors';
+import { streamChat, type ChatMessage, type StreamMeta } from './openai-compat';
 import type { AIConfig } from './config';
 
 export interface ErrorBody {
@@ -20,8 +26,9 @@ export interface ErrorBody {
   detail?: string;
 }
 
-function jsonError(status: number, error: string, detail?: string): Response {
-  return new Response(JSON.stringify({ error, ...(detail ? { detail } : {}) } satisfies ErrorBody), {
+export function jsonError(status: number, error: string, detail?: string): Response {
+  const body: ErrorBody = { error, ...(detail ? { detail } : {}) };
+  return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
@@ -31,31 +38,58 @@ function jsonError(status: number, error: string, detail?: string): Response {
  * 启动流式回复。
  *
  * 错误分两段处理：
- *   - 上游连不上 / 返回非 2xx：还没有写出任何 SSE 字节，直接回 JSON 错误，
- *     前端能拿到真实状态码（404 语义要留给「接口不存在」，所以这里把上游的 404 改判为 502）。
- *   - 已经开流后出错：只能往流里塞一帧 error 事件并结束，前端会保留已收到的内容。
+ *   - 连不上 / 上游非 2xx 且重试耗尽：还没写出任何 SSE 字节，直接回 JSON + 真实状态码，
+ *     前端能据此给出精确提示（注意：404 语义留给「接口未实现」，上游 404 改判 502）。
+ *   - 已开流后出错：写一帧 error 事件后结束，前端保留已收到内容并展示错误。
  */
 export function streamAIResponse(config: AIConfig, messages: ChatMessage[]): Response {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let closed = false;
       const send = (obj: unknown) => {
+        if (closed) return;
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      };
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
       };
 
       try {
-        for await (const delta of streamChat(config, messages)) {
-          send({ delta: { text: delta } });
+        for await (const chunk of streamChat(config, messages)) {
+          if (chunk.text) {
+            send({ delta: { text: chunk.text } });
+          }
+          // reasoning 增量刻意不转发：前端没有「思考过程」的展示位，
+          // 混进正文会让用户以为模型在自说自话。
+          if (chunk.meta && (chunk.meta.usage || chunk.meta.finishReason)) {
+            const meta: StreamMeta = chunk.meta;
+            send({ meta });
+          }
         }
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        finish();
       } catch (e) {
-        const message =
-          e instanceof AIError ? e.message : e instanceof Error ? e.message : '未知错误';
-        send({ error: message });
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-      } finally {
-        controller.close();
+        const isAI = e instanceof AIError;
+        const message = isAI
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : '未知错误';
+
+        if (isAI) {
+          console.error(`[ai/stream] 失败 status=${e.status}${e.detail ? ` detail=${e.detail}` : ''}：${e.message}`);
+        } else {
+          console.error('[ai/stream] 未预期异常：', e);
+        }
+
+        // 无论是否已吐出正文，都发同一帧：前端拿到 message 就展示，
+        // 已有内容会保留在气泡里（用户看到「半截回答 + 错误原因」比空白更有用）。
+        send({ error: { message, status: isAI ? e.status : 502 } });
+        finish();
       }
     },
   });
@@ -65,10 +99,8 @@ export function streamAIResponse(config: AIConfig, messages: ChatMessage[]): Res
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      // 关掉 Nginx / CDN 的缓冲，否则流式会变成「憋到最后一次性吐出来」
+      // 关掉 Nginx / CDN 缓冲，否则流式会变成「憋到最后一次性吐出来」
       'X-Accel-Buffering': 'no',
     },
   });
 }
-
-export { jsonError };
