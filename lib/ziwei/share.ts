@@ -1,5 +1,6 @@
 import type { BirthFormState } from '@/components/BirthForm';
 import type { BirthInfo } from './types';
+import type { LateZishi } from './school-config';
 
 /** 根据北京时间 + 经度计算真太阳时时辰支 (0-11) */
 export function calcTrueSolarBranch(clockHour: number, clockMinute: number, longitude: number): number {
@@ -12,18 +13,21 @@ export function calcTrueSolarBranch(clockHour: number, clockMinute: number, long
 
 /** BirthFormState → BirthInfo
  *
- * 子时规则（倪海厦体系/三合派标准）：
- * · 23:00-23:59 = 晚子时，**按次日**排盘（日期 +1）
- * · 00:00-00:59 = 早子时，按本日排盘
- * 这与「时辰支同为子(0)」并不冲突——子时分早晚两段，需要在日期上区分。
+ * 子时规则（可按流派切换，见 school-config 的 lateZishi）：
+ * · next-day（默认，倪海厦体系/三合派标准）= 23:00-23:59 晚子时按**次日**排盘（日期 +1）
+ * · current-day / all-current / day-cur-time-next = 日期按当日，不推进
+ * 00:00-00:59 早子时在任何流派下都按本日排盘。
+ *
+ * 注意：判定用**钟表时间 23 点**，不用真太阳时的时辰支——真太阳时会让 22 点多也算成子时，
+ * 那是地理位置修正的结果，不应该再额外把日期推进一天。
  */
-export function formToBirthInfo(form: BirthFormState): BirthInfo {
+export function formToBirthInfo(form: BirthFormState, lateZishi: LateZishi = 'next-day'): BirthInfo {
   let y = parseInt(form.year) || 0;
   let m = parseInt(form.month) || 0;
   let d = parseInt(form.day) || 0;
 
   // 晚子时（23:00-23:59）按次日处理：用 Date 对象自动处理月末/年末进位
-  if (!form.unknownTime) {
+  if (!form.unknownTime && lateZishi === 'next-day') {
     const clockHour = parseInt(form.clockHour) || 0;
     if (clockHour === 23 && y > 0 && m > 0 && d > 0) {
       const next = new Date(y, m - 1, d + 1);

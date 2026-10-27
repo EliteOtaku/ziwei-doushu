@@ -49,6 +49,12 @@ function fmtPalace(palace: Palace, chart: ZiweiChart): string {
     lines.push(`  大限：${palace.daXianAge[0]}-${palace.daXianAge[1]} 岁`);
   }
 
+  // 长生十二神只报三个有命理意义的节点（长生/帝旺/墓），其余八神对解读几无影响，
+  // 全报只会稀释上下文、把模型注意力从主星四化上引开。
+  if (palace.changsheng12 && ['长生', '帝旺', '墓'].includes(palace.changsheng12)) {
+    lines.push(`  长生十二神：${palace.changsheng12}`);
+  }
+
   const major = palace.stars.filter(s => s.type === 'major');
   const lucky = palace.stars.filter(s => s.type === 'lucky');
   const sha = palace.stars.filter(s => s.type === 'sha');

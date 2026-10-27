@@ -10,3 +10,7 @@ node_modules
 
 # pm2 日志（ecosystem.config.js 指定）
 logs/
+
+# 本地排查/验收用的临时探针脚本
+.probe/
+.dsh-ops/

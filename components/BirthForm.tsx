@@ -5,6 +5,7 @@ import type { BirthInfo } from '@/lib/ziwei/types';
 import { SHICHEN } from '@/lib/ziwei/constants';
 import { useTheme } from '@/components/ThemeProvider';
 import { PROVINCES } from '@/lib/ziwei/cities';
+import type { LateZishi } from '@/lib/ziwei/school-config';
 
 export interface BirthFormState {
   name: string;
@@ -21,14 +22,16 @@ export interface BirthFormState {
 }
 
 interface BirthFormProps {
-  onSubmit: (info: BirthInfo) => void;
+  /** 第二个参数是原始表单（未做晚子时日期推进），父级切换流派时可用它按新口径重算 */
+  onSubmit: (info: BirthInfo, form: BirthFormState) => void;
   loading?: boolean;
   initialData?: Partial<BirthFormState>;
   onFormSave?: (data: BirthFormState) => void;
   /** 隐藏内部「立即起盘」按钮（合盘等场景由父级统一触发） */
   hideSubmit?: boolean;
+  /** 晚子时流派（23:00-23:59 是否按次日排盘）；不传 = next-day，与历史行为一致 */
+  lateZishi?: LateZishi;
 }
-
 const SHICHEN_NAMES = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
 
 /** 根据北京时间 + 经度计算真太阳时时辰支 (0-11) */
@@ -47,7 +50,7 @@ function isValidDate(y: number, m: number, d: number): boolean {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
 }
 
-export default function BirthForm({ onSubmit, loading, initialData, onFormSave, hideSubmit }: BirthFormProps) {
+export default function BirthForm({ onSubmit, loading, initialData, onFormSave, hideSubmit, lateZishi = 'next-day' }: BirthFormProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -145,7 +148,16 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
     setTouched({ year: true, month: true, day: true });
     if (hasError) return;
     onFormSave?.({ ...form });
-    onSubmit({ year: y, month: m, day: d, hour: branch, gender: form.gender, name: form.name || undefined, province: form.province || undefined, city: form.city || undefined, longitude: form.province ? form.longitude : undefined });
+
+    // 晚子时（23:00-23:59）：按流派决定是否把日期推到次日。
+    // 判定用钟表 23 点而非真太阳时时辰支——经度修正让 22 点多也算子时，那不是跨日的理由。
+    let sy = y, sm = m, sd = d;
+    if (!form.unknownTime && lateZishi === 'next-day' && (parseInt(form.clockHour) || 0) === 23) {
+      const next = new Date(y, m - 1, d + 1);
+      sy = next.getFullYear(); sm = next.getMonth() + 1; sd = next.getDate();
+    }
+
+    onSubmit({ year: sy, month: sm, day: sd, hour: branch, gender: form.gender, name: form.name || undefined, province: form.province || undefined, city: form.city || undefined, longitude: form.province ? form.longitude : undefined }, { ...form });
   };
 
   // ─── 样式变量 ────────────────────────────────────────────

@@ -77,6 +77,8 @@ export interface Palace {
   borrowedFromName?: string;
   /** 若为空宫，借到的对宫主星名列表（结构化数据，文案层不再需要从文本反查） */
   borrowedStars?: string[];
+  /** 长生十二神（长生 / 沐浴 / 冠带 … 养），落在本宫的那一个 */
+  changsheng12?: string;
 }
 
 export interface DaXianSiHua {

@@ -57,12 +57,15 @@ export default function PalaceCell({
   palace, onClick, onStarClick, isSelected, isSanFang, delay = 0,
   overlayStarSiHua, overlayLabel, onSiHuaClick,
 }: PalaceCellProps) {
-  const { branch, stem, name, stars, daXianAge, isCurrentDaXian, isMingGong, isShenGong } = palace;
+  const { branch, stem, name, stars, daXianAge, isCurrentDaXian, isMingGong, isShenGong, changsheng12 } = palace;
   const ganzhi = `${STEMS[stem]}${BRANCHES[branch]}`;
 
   const majorStars = stars.filter(s => s.type === 'major');
   const luckyStars = stars.filter(s => s.type === 'lucky');
   const shaStars = stars.filter(s => s.type === 'sha');
+
+  // 长生十二神里只有「长生 / 帝旺 / 墓」三个有意义节点，其余弱化显示
+  const CHANGSHENG_KEY = ['长生', '帝旺', '墓'];
 
   return (
     <motion.div
@@ -120,8 +123,23 @@ export default function PalaceCell({
         )}
       </div>
 
-      {/* 干支 */}
-      <div className="text-[9px] font-mono mb-1" style={{ color: 'var(--t-faint)', opacity: 0.75 }}>{ganzhi}</div>
+      {/* 干支 + 长生十二神 */}
+      <div className="flex items-center gap-1 mb-1">
+        <span className="text-[9px] font-mono" style={{ color: 'var(--t-faint)', opacity: 0.75 }}>{ganzhi}</span>
+        {changsheng12 && (
+          <span
+            className={clsx(
+              'text-[9px] leading-none px-1 py-px rounded-sm border',
+              CHANGSHENG_KEY.includes(changsheng12)
+                ? 'text-emerald-400/90 border-emerald-500/30 bg-emerald-500/10'
+                : 'text-slate-500/70 border-slate-500/20',
+            )}
+            title={`长生十二神：${changsheng12}`}
+          >
+            {changsheng12}
+          </span>
+        )}
+      </div>
 
       {/* 主星 */}
       <div className="flex flex-col gap-0.5 flex-1">

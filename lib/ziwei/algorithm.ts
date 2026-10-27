@@ -5,11 +5,15 @@
 
 import { astro } from 'iztro';
 import { Solar, LunarMonth } from 'lunar-javascript';
-import type { BirthInfo, LunarInfo, Star, Palace, DaXian, DaXianSiHua, ZiweiChart } from './types';
+import type { BirthInfo, LunarInfo, Star, Palace, DaXian, ZiweiChart } from './types';
 import { BRANCHES, STEMS } from './constants';
 import { schoolStarBrightness, type BrightnessSchool } from './school-data';
-import { SCHOOL_AX } from './school-tables.generated';
-import { DEFAULT_LEAP_MONTH } from './school-config';
+import { DEFAULT_LEAP_MONTH, SCHOOL_DEFAULT_CONFIG, type SchoolConfig } from './school-config';
+import { mapBrightness, extractRawBrightness, mapStarType } from './star-meta';
+import { applySchoolConfig, schoolDahaoBranch } from './school-apply';
+
+// 年支大耗的落宫函数历史上从本文件导出（回归脚本引用），保持向后兼容
+export { schoolDahaoBranch };
 // 飞星派工具仅供导出，不再在排盘时调用（倪师《天纪 03》：四化星永远固定不动）
 // import { detectSelfSihua, getSiHuaByStem } from './sihua';
 
@@ -277,45 +281,8 @@ export function calcYinYangGender(yearStem: number, gender: 'male' | 'female'): 
   return `${yearStem % 2 === 0 ? '阳' : '阴'}${gender === 'male' ? '男' : '女'}`;
 }
 
-// ─── 亮度映射 ────────────────────────────────────────────────────
-function mapBrightness(b?: string): 'bright' | 'normal' | 'dim' {
-  if (!b) return 'normal';
-  if (b === '庙' || b === '旺') return 'bright';
-  if (b === '陷' || b === '不' || b === '闲') return 'dim';
-  return 'normal';
-}
-
-/** 从 iztro 原始亮度文本中提取标准 7 档之一 */
-function extractRawBrightness(b?: string): import('./types').StarBrightness | undefined {
-  if (!b) return undefined;
-  const valid: import('./types').StarBrightness[] = ['庙', '旺', '得', '利', '平', '不', '闲', '陷', '地'];
-  for (const x of valid) {
-    if (b.includes(x)) return x;
-  }
-  return undefined;
-}
-
-// ─── 星曜类型映射 ────────────────────────────────────────────────
-const SHA_STARS = new Set(['擎羊', '陀罗', '火星', '铃星', '地空', '地劫',
-  '天空', '旬空', '副旬', '截路', '截空', '副截', '大耗', '天使', '天伤',
-  // ★ 扩充（之前只判主煞，半凶杂耀漏判）
-  '天刑', '天哭', '天虚', '天月', '阴煞', '蜚廉', '空亡',
-  '孤辰', '寡宿']);
-const LUCKY_STARS = new Set(['文昌', '文曲', '左辅', '右弼', '天魁', '天钺',
-  '禄存', '天马', '天官', '天福', '天才', '天寿', '三台', '八座', '恩光',
-  '天贵', '台辅', '龙池', '凤阁', '红鸾', '天喜',
-  // ★ 扩充：吉杂耀
-  '解神', '天德', '月德', '年解', '天巫', '华盖', '封诰']);
-
-function mapStarType(starName: string, iztroType: string): Star['type'] {
-  if (SHA_STARS.has(starName)) return 'sha';
-  if (LUCKY_STARS.has(starName)) return 'lucky';
-  const t = (iztroType ?? '').toLowerCase();
-  if (t === '主星' || t === 'major') return 'major';
-  if (t === '煞星' || t === 'tough') return 'sha';
-  if (t === '吉星' || t === 'soft' || t === '禄存' || t === '天马') return 'lucky';
-  return 'minor';
-}
+// ─── 亮度映射 / 星曜类型映射 ─────────────────────────────────────
+// 实现已抽到 star-meta.ts（school-apply.ts 也要用同一套规则，不能各写一份）
 
 // ─── 五行局名称 → 数字 ──────────────────────────────────────────
 function parseWuxingJu(name: string): number {
@@ -328,122 +295,20 @@ function parseWuxingJu(name: string): number {
 }
 
 // ─── 主函数：生成命盘 ────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────
-// 天魁天钺 · 默认派(KY1)修正
+// 各流派开关的实际落星逻辑都在 school-apply.ts；本文件只负责用 iztro 排出基础盘。
 //
-// 用户决策(2026-05-30):排盘对齐主流排盘默认口径(金标准盘对照实证,见 docs/school-parity-report.md)。
-// 实测 10 天干年仅【辛年】与 iztro 现状不同:
-//   辛年  默认口径 = 天魁在寅 / 天钺在午;iztro(主流) = 天魁在午 / 天钺在寅。
-// ⚠️ 默认派在辛年与主流「辛马虎 = 魁午钺寅」口诀相反(魁钺对调)。这是主流排盘软件的
-//    既定排法,此处遵用户「对齐默认口径」决定。其余 9 个天干年默认口径与 iztro 本就一致。
-// 回退:删除 generateChart 内 applySchoolKuiyue(...) 调用即恢复 iztro 主流派。
+// 天魁天钺默认派（KY1）修正：用户决策 2026-05-30 对齐主流排盘默认口径，
+// 实测 10 天干仅【辛年】与 iztro 不同（默认派 魁寅钺午，iztro 魁午钺寅），
+// 其余 9 年本来一致。该逻辑已并入 school-apply.ts 的 applyKuiyue。
 // ─────────────────────────────────────────────────────────────────────────
-function relocateStar(palaces: Palace[], name: string, targetBranch: number): void {
-  let moved: Star | undefined;
-  for (const p of palaces) {
-    const i = p.stars.findIndex((s) => s.name === name);
-    if (i >= 0) {
-      if (p.branch === targetBranch) return; // 已在目标宫,无需移动
-      moved = p.stars[i];
-      p.stars.splice(i, 1);
-      break;
-    }
-  }
-  if (!moved) return;
-  const target = palaces.find((p) => p.branch === targetBranch);
-  if (target) {
-    target.stars.push(moved);
-    // ★ 2026-06-20 天魁天钺换位（默认派 KY1）后,亮度仍是 iztro 旧宫位算的（错位）。按新宫地支重算亮度。
-    const rb = schoolStarBrightness(moved.name, targetBranch, currentBrightSchool);
-    moved.brightnessRaw = extractRawBrightness(rb);
-    moved.brightness = rb ? mapBrightness(rb) : undefined;
-  }
-}
-
-function applySchoolKuiyue(palaces: Palace[], yearStemCn: string): void {
-  const gan = STEMS.indexOf(yearStemCn); // 甲=0 … 癸=9
-  if (gan < 0) return;
-  const row = SCHOOL_AX.KY_ARR1[gan + 1]; // KY 表「甲=1」起;子起一编码
-  if (!row) return;
-  relocateStar(palaces, '天魁', row[0] - 1); // 子起一(子=1) → BRANCHES 索引(子=0)
-  relocateStar(palaces, '天钺', row[1] - 1);
-}
-
-/**
- * 本命顶栏「大耗」（年支星，不是宫底博士十二神那颗）。
- * 2026-08-14 按金标准盘核对十二年支：阳支岁破+1，阴支岁破−1。
- * 子=0 起偶数为阳支（子寅辰午申戌）。
- */
-export function schoolDahaoBranch(yearBranch: number): number {
-  const suiPo = (yearBranch + 6) % 12;
-  return yearBranch % 2 === 0 ? (suiPo + 1) % 12 : (suiPo + 11) % 12;
-}
-
-function pushNatalStar(palaces: Palace[], branch: number, name: string): void {
-  const target = palaces.find((p) => p.branch === branch);
-  if (!target || target.stars.some((s) => s.name === name)) return;
-  const rb = schoolStarBrightness(name, branch, currentBrightSchool);
-  target.stars.push({
-    name,
-    type: mapStarType(name, ''),
-    brightness: rb ? mapBrightness(rb) : undefined,
-    brightnessRaw: extractRawBrightness(rb),
-  });
-}
-
-function applySchoolDahao(palaces: Palace[], yearBranch: number): void {
-  pushNatalStar(palaces, schoolDahaoBranch(yearBranch), '大耗');
-}
-
-/**
- * 本命顶栏截空/副截。
- * 对子仍是甲己申酉、乙庚午未、丙辛辰巳、丁壬寅卯、戊癸子丑（iztro 已排对）。
- * 阳干截空落阳宫、副截落阴宫；阴干对调。iztro 一律截路=阳宫、空亡=阴宫，阴干要换宫。
- * 2026-08-14 金标准盘：辛丑巳截空/辰副截，己亥酉截空/申副截，乙巳未截空/午副截。
- */
-function applySchoolJiekong(palaces: Palace[], yearStem: number): void {
-  for (const p of palaces) {
-    for (const s of p.stars) {
-      if (s.name === '截路') s.name = '截空';
-      else if (s.name === '空亡') s.name = '副截';
-      else continue;
-      // ★ 2026-10-20 改名后按新名字补亮度：iztro 原名查不到亮度，阳干年（不换宫、下面直接 return）
-      //   截空 / 副截一直留白，主流排盘默认口径是有亮度的（真盘：丙寅 辰截空=陷、巳副截=庙）。阴干换宫后下面再按新宫重算。
-      const rb = schoolStarBrightness(s.name, p.branch, currentBrightSchool);
-      s.brightness = rb ? mapBrightness(rb) : undefined;
-      s.brightnessRaw = extractRawBrightness(rb);
-    }
-  }
-  if (yearStem % 2 === 0) return;
-  const jie = palaces.find((p) => p.stars.some((s) => s.name === '截空'));
-  const fu = palaces.find((p) => p.stars.some((s) => s.name === '副截'));
-  if (!jie || !fu || jie === fu) return;
-  const jieStar = jie.stars.find((s) => s.name === '截空');
-  const fuStar = fu.stars.find((s) => s.name === '副截');
-  if (!jieStar || !fuStar) return;
-  jie.stars = jie.stars.filter((s) => s !== jieStar);
-  fu.stars = fu.stars.filter((s) => s !== fuStar);
-  const rbJ = schoolStarBrightness('截空', fu.branch, currentBrightSchool);
-  const rbF = schoolStarBrightness('副截', jie.branch, currentBrightSchool);
-  jieStar.brightness = rbJ ? mapBrightness(rbJ) : undefined;
-  jieStar.brightnessRaw = extractRawBrightness(rbJ);
-  fuStar.brightness = rbF ? mapBrightness(rbF) : undefined;
-  fuStar.brightnessRaw = extractRawBrightness(rbF);
-  fu.stars.push(jieStar);
-  jie.stars.push(fuStar);
-}
-
-/** 旬空成对（子丑/寅卯/辰巳/午未/申酉/戌亥）。副旬落在另一支：旬空阳支+1、阴支−1。 */
-function applySchoolFuxun(palaces: Palace[]): void {
-  const xun = palaces.find((p) => p.stars.some((s) => s.name === '旬空'));
-  if (!xun) return;
-  const fu = xun.branch % 2 === 0 ? (xun.branch + 1) % 12 : (xun.branch + 11) % 12;
-  pushNatalStar(palaces, fu, '副旬');
-}
 
 export function generateChart(
   birthInfo: BirthInfo,
-  opts?: { leapMonth?: LunarMonthPolicy },
+  opts?: {
+    leapMonth?: LunarMonthPolicy;
+    /** 流派配置；不传则用默认口径（与服务端 /api/generate 一致） */
+    schoolConfig?: SchoolConfig;
+  },
 ): ZiweiChart {
   const { year, month, day, hour, gender } = birthInfo;
   if (!Number.isInteger(hour) || hour < 0 || hour > 11) {
@@ -465,6 +330,11 @@ export function generateChart(
   // 非 split 时先算农历，闰月才切 byLunar；非闰月仍走 bySolar，与 split 行为完全一致
   const leapMode = opts?.leapMonth ?? DEFAULT_LEAP_MONTH;
   const effectiveLunar = resolveEffectiveLunarDate(year, month, day, leapMode);
+
+  // 亮度流派：本次排盘显式传入的配置优先，否则用模块级默认（setBrightnessSchool 设置的）
+  const schoolConfig = opts?.schoolConfig ?? SCHOOL_DEFAULT_CONFIG;
+  const brightSchool: BrightnessSchool =
+    schoolConfig.brightnessSchool === 'default' ? 'QS' : schoolConfig.brightnessSchool;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let astrolabe: any;
@@ -502,7 +372,7 @@ export function generateChart(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ...(p.majorStars ?? []).map((s: any) => {
         // ★ 2026-06-20 全套对齐主流排盘口径:亮度统一查 SB_[currentBrightSchool] 表(全书派默认),不再用 iztro/善本表
-        const rb = schoolStarBrightness(s.name as string, branch, currentBrightSchool);
+        const rb = schoolStarBrightness(s.name as string, branch, brightSchool);
         return {
           name:          s.name as string,
           type:          'major' as const,
@@ -514,7 +384,7 @@ export function generateChart(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ...(p.minorStars ?? []).map((s: any) => {
         // ★ 2026-06-20 辅星(左辅右弼天魁天钺禄存天马) + 煞星(火铃羊陀空劫) 同走 SB 表(同一套映射/索引)
-        const rb = schoolStarBrightness(s.name as string, branch, currentBrightSchool);
+        const rb = schoolStarBrightness(s.name as string, branch, brightSchool);
         return {
           name:          s.name as string,
           type:          mapStarType(s.name as string, s.type as string),
@@ -530,7 +400,7 @@ export function generateChart(
       ...(p.adjectiveStars ?? []).map((s: any) => {
         // ★ 2026-06-20 杂耀亮度对齐主流排盘口径：行号 = SB 亮度表 ID（SCHOOL_STAR_ID_TO_NAME 反查），
         //   落宫沿用 iztro（与金标准盘一致），金标准盘 24/24 验证。名字不在表里的杂耀 → undefined（留白，同现状）。
-        const rb = schoolStarBrightness(s.name as string, branch, currentBrightSchool);
+        const rb = schoolStarBrightness(s.name as string, branch, brightSchool);
         return {
           name:          s.name as string,
           type:          mapStarType(s.name as string, (s.type as string) ?? ''),
@@ -544,7 +414,7 @@ export function generateChart(
     // ★ 2026-06-20 对齐主流排盘口径：默认口径把「岁前12神/将前12神」里的特定神煞当本命星显示
     //   （劫煞@将前、龙德@岁前），iztro 把这两套放在 jiangqian12/suiqian12 单独字段，
     //   原装配只取 major/minor/adjective 三类 → 整套漏了。在此补回（这两颗金标准盘亦不标亮度，留白）。
-    //   年支大耗不走岁前12神（iztro 岁前大耗=岁破，默认口径不是），见 applySchoolDahao。
+    //   年支大耗不走岁前12神（iztro 岁前大耗=岁破，默认口径不是），见 school-apply 的 applyDahao。
     for (const sname of [p.suiqian12, p.jiangqian12] as (string | undefined)[]) {
       if (sname === '劫煞' || sname === '龙德') {
         allStars.push({ name: sname, type: mapStarType(sname, '') });
@@ -564,9 +434,13 @@ export function generateChart(
     };
   });
 
-  // ★ 天魁天钺对齐默认派(KY1)——用户决策 2026-05-30,实测仅辛年与现状不同(见上方函数注释)
-  const yearStemCn = (astrolabe.rawDates?.chineseDate?.yearly?.[0]) as string | undefined;
-  if (yearStemCn) applySchoolKuiyue(palaces, yearStemCn);
+  // iztro 原生长生十二神：地支索引 → 神名，交给 school-apply 落字段（流派切换时要基于它重排）
+  const rawChangsheng: Record<number, string | undefined> = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const p of astrolabe.palaces as any[]) {
+    const b = BRANCHES.indexOf(p.earthlyBranch as string);
+    if (b >= 0) rawChangsheng[b] = p.changsheng12 as string | undefined;
+  }
 
   // ── 当前年龄 & 大限 ──
   // ★ 用 iztro horoscope.age.nominalAge（中国虚岁口径，与 daXianAge 范围一致）
@@ -633,10 +507,19 @@ export function generateChart(
   // ── 农历信息（含节气四柱）──
   const lunarInfo = getLunarInfo(year, month, day, hour, leapMode);
 
-  // ★ 2026-08-14 金标准盘核对：截空/副截阴干对调 + 年支大耗 + 旬空成对副旬
-  applySchoolJiekong(palaces, lunarInfo.yearStem);
-  applySchoolDahao(palaces, lunarInfo.yearBranch);
-  applySchoolFuxun(palaces);
+  // ── 流派后处理：截空/副截、大耗、旬空成对、魁钺、天马、天空、庚年四化、天使天伤、长生十二神 ──
+  // 全部开关集中在 school-apply.ts；这里只负责把 ctx 备齐。
+  applySchoolConfig(palaces, {
+    config: schoolConfig,
+    yearStem: lunarInfo.yearStem,
+    yearBranch: lunarInfo.yearBranch,
+    lunarMonth: lunarInfo.lunarMonth,
+    hour,
+    gender,
+    wuxingJuName,
+    brightnessSchool: brightSchool,
+    rawChangsheng,
+  });
 
   // ── 命主 / 身主 / 阴阳性别 ──
   const mingZhu = calcMingZhu(mingGongBranch >= 0 ? mingGongBranch : 0);

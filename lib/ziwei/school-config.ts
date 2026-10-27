@@ -257,8 +257,11 @@ export const SCHOOL_OPTIONS = {
   ],
   changshengSchool: [
     { value: 'yin-yang-shun-ni', label: '区分阴阳顺逆', desc: '默认 · 阴阳顺逆起长生' },
-    { value: 'shui-tu', label: '水土共长生', desc: '土五局起点 = 水二局起点 (申)' },
-    { value: 'huo-tu', label: '火土共长生', desc: '土五局起点 = 火六局起点 (寅)' },
+    // ★ 水土共长生：土五局长生起点本就等于水二局（同起申宫），所以选它排盘结果与默认相同。
+    //   保留该项是因为它是通行说法里的一个流派名目，用户会来找；desc 里直接讲清「同默认」，
+    //   避免用户以为切了没反应是 bug（回归测试 school-switches.test.ts 对此做了白名单）。
+    { value: 'shui-tu', label: '水土共长生', desc: '土五局起点 = 水二局起点（申）· 排盘结果与默认相同' },
+    { value: 'huo-tu', label: '火土共长生', desc: '土五局起点 = 火六局起点（寅）· 会改变土五局命盘的长生分布' },
   ],
   lateZishi: [
     { value: 'next-day', label: '视为次日', desc: '默认 · 主流做法' },
