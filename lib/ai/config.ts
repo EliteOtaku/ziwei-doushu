@@ -75,24 +75,6 @@ export interface AIConfig {
   retryBaseMs: number;
   /** 是否上送 stream_options.include_usage 以获取 token 统计 */
   includeUsage: boolean;
-  /**
-   * 该通道是否接受 `role: 'system'` 消息。
-   *
-   * 绝大多数 OpenAI 兼容服务都接受，但不接受时必须把 system 内容并进
-   * 第一条 user 消息 —— 见 openai-compat.ts 的 foldSystemIntoUser()。
-   * 这不是可选优化：某些通道会直接以 4xx 拒绝含 system 的请求。
-   */
-  supportsSystemRole: boolean;
-  /**
-   * 追加到末条 user 消息之后的一句额外约束（可选）。
-   *
-   * 为什么需要：实测本地 GLM 通道（glm-5.3-flash）在收到「分五段详细分析」
-   * 这类不封顶的输出要求时，会把预算全烧在 reasoning 上，正文一个字都不产出；
-   * 同一提示词加上「总长控制在 400 字内」即可正常返回（90s 无输出 → 68s 完整回答）。
-   * 这不是模型缺陷而是该通道的推理预算特性，故以通道级配置兜住，
-   * 不去改前端的产品提示词。
-   */
-  outputHint?: string;
 }
 
 interface Preset {
@@ -100,13 +82,9 @@ interface Preset {
   model: string;
   /** 该通道不需要密钥（本地反代 / 免鉴权自建服务） */
   requiresApiKey?: boolean;
-  /** 该通道不接受 system role，需并入 user 消息 */
-  supportsSystemRole?: boolean;
   /** 该通道对 max_tokens / reasoning_effort 的实际支持情况，仅用于文档与告警 */
   ignoresMaxTokens?: boolean;
   ignoresReasoningEffort?: boolean;
-  /** 追加到末条 user 消息后的额外输出约束 */
-  outputHint?: string;
 }
 
 /**
@@ -129,20 +107,16 @@ const PRESETS: Record<string, Preset> = {
     // 本地 Zcode 反代出来的智谱 GLM 通道（2026-10-27 实测）
     // 实测结论：
     //   - 不需要 Authorization（带 dummy 头也放行）
-    //   - **含 role:'system' 会被上游风控拦截**（405 / code 3012），必须并入 user
+    //   - **含 role:'system' 会被上游风控拦截**（405 / code 3012）→ 全通道统一折叠，见 openai-compat
     //   - thinking:{type} 不被支持（400）
     //   - max_tokens 被忽略（设 8 也不截断）
     //   - reasoning_effort 接受但不真正关闭思考，始终有思考阶段
+    //   - 对不封顶的长输出要求会只思考不产出 → 字数上限改由提示词层统一控制
     baseUrl: 'http://127.0.0.1:8081/v1',
     model: 'glm-5.3-flash',
     requiresApiKey: false,
-    supportsSystemRole: false,
     ignoresMaxTokens: true,
     ignoresReasoningEffort: true,
-    // 不加这句时，前端「分五段详细分析」类提示词会让它 90s 内只思考不产出。
-    // 加了之后同一提示词可正常返回（实测 68s / 429 字）。
-    outputHint:
-      '回答要求：直接开始输出正文，总长控制在 400 字以内，各部分简明扼要，不要展开长篇推理。',
   },
 };
 
@@ -232,8 +206,6 @@ export function resolveAIConfig(): ResolveResult {
       maxAttempts: positiveInt(process.env.AI_MAX_ATTEMPTS, 3),
       retryBaseMs: positiveInt(process.env.AI_RETRY_BASE_MS, 1_000),
       includeUsage: process.env.AI_INCLUDE_USAGE !== 'false',
-      supportsSystemRole: preset.supportsSystemRole !== false,
-      outputHint: (process.env.AI_OUTPUT_HINT || preset.outputHint || '').trim() || undefined,
     },
   };
 }

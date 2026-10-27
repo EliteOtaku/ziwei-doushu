@@ -67,9 +67,12 @@ function fmtPalace(palace: Palace, chart: ZiweiChart): string {
   if (lucky.length > 0) lines.push(`  吉星：${lucky.map(fmtStar).join('、')}`);
   if (sha.length > 0) lines.push(`  煞星：${sha.map(fmtStar).join('、')}`);
 
-  if (palace.selfSihua?.length) {
-    lines.push(`  宫干自化：${palace.selfSihua.map(s => `${s.starName}化${s.siHua}`).join('、')}`);
-  }
+  // 刻意不输出「宫干自化」。
+  // 倪海厦体系不使用宫干自化（见 lib/ziwei/patterns.ts 第 6 行，以及
+  // lib/classics/data/quanshu.ts 四化论：「四化星不动…北派飞星派之自化、宫干飞化、
+  // 来因宫等，倪师不主张使用」）。早期实现把每宫的 selfSihua 打印出来，
+  // 与提示词里「不用宫干自化」自相矛盾，会诱导模型拿它立论。
+  // 排盘层仍计算该字段（命盘看板要用），只是 AI 上下文不再携带。
 
   return lines.join('\n');
 }
@@ -104,14 +107,14 @@ export function formatChart(chart: ZiweiChart): string {
       .join('\n'),
   );
 
-  // 当前大限单独拎出来，模型最容易忽略它
+  // 当前大限单独拎出来，模型最容易忽略它。
+  // 刻意只给「哪些岁数、行哪一宫」，不输出大限四化、也不输出该宫天干：
+  // 倪海厦体系论大限靠「大限走到哪一宫、那一宫本有什么星」，而不是用大限宫干另起四化。
+  // 给了天干和大限四化，模型会不自觉滑向飞星派推演（见 prompts.ts 的口径说明）。
   const current = chart.daXians[chart.currentDaXianIndex];
   if (current) {
-    const sihua = current.siHua
-      ? `，大限四化：禄${current.siHua.lu} 权${current.siHua.quan} 科${current.siHua.ke} 忌${current.siHua.ji}`
-      : '';
     blocks.push(
-      `## 当前大限\n${current.startAge}-${current.endAge} 岁，行【${current.palaceName}】${current.stemName ? `（${current.stemName}干）` : ''}${sihua}`,
+      `## 当前大限\n${current.startAge}-${current.endAge} 岁，行【${current.palaceName}】`,
     );
   }
 

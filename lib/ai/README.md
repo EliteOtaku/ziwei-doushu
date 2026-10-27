@@ -56,12 +56,12 @@ DEEPSEEK_API_KEY=sk-xxx        # <通道>_API_KEY
 
 | 事实 | 影响 | 处理位置 |
 |---|---|---|
-| 不接受 `role: 'system'`，返回 405 / `code 3012 unusual activity` | 报错完全不提 system，极难定位 | `foldSystemIntoUser()` 把 system 并入首条 user |
+| 不接受 `role: 'system'`，返回 405 / `code 3012 unusual activity` | 报错完全不提 system，极难定位 | 所有通道统一折叠：`foldSystemIntoUser()` 把 system 并入首条 user，用 `---` 分隔 |
 | 不需要 `Authorization` | 空 Bearer 可能被拒 | `apiKey` 为空时不下发该头 |
 | `thinking:{type}` 不支持（400） | 不能用标准开关关思考 | 不上送该字段 |
 | `reasoning_effort` 接受但不生效 | 无法关闭思考阶段 | 仍上送（无害），日志告警 |
 | `max_tokens` 被忽略（设 8 也不截断） | 无法限制输出 | 仍上送（无害），日志告警 |
-| 「分多段详细分析」类不封顶要求会**只思考不产出** | 90s 内正文 0 字 | 预设自带 `outputHint`（400 字上限）|
+| 「分多段详细分析」类不封顶要求会**只思考不产出** | 90s 内正文 0 字 | 字数上限写进提示词（单人 450 / 合盘 650 字）|
 
 最后一条最隐蔽：同一提示词加上「总长控制在 400 字以内」后，
 90s 无输出 → 68s 完整回答（实测）。
@@ -73,11 +73,27 @@ DEEPSEEK_API_KEY=sk-xxx        # <通道>_API_KEY
 | `AI_MAX_TOKENS` | **不设** | 不设时不上送该字段，由上游按官方默认处理：非思考 8K、思考 64K（effort=max 时 128K）。显式设置上限 393216 |
 | `AI_IDLE_TIMEOUT_MS` | 120000 | **空闲超时**：连续这么久收不到任何字节才中断，而非限制整条流总时长 |
 | `AI_FIRST_CONTENT_TIMEOUT_MS` | 90000 | **首字正文超时**：从请求发出算起，这么久还没第一段正文就报错。思考型模型只吐 reasoning 时空闲计时器会被不断重置，必须靠这道闸兜住 |
-| `AI_OUTPUT_HINT` | 通道预设值 | 追加到末条 user 消息的输出约束，覆盖预设 |
 | `AI_REASONING_EFFORT` | 不传 | `none` / `low` / `high` / `max`；别名 `minimal`→low、`medium`/`xhigh`→high、`ultra`→max。不传时用官方默认（`high`） |
 | `AI_MAX_ATTEMPTS` | 3 | 429 / 500 / 503 的最大尝试次数（含首次） |
 | `AI_RETRY_BASE_MS` | 1000 | 指数退避基准；有 `Retry-After` 时优先用它，上限 30s |
 | `AI_INCLUDE_USAGE` | true | 上送 `stream_options.include_usage` 以获取 token 统计 |
+
+## 体系口径：只用生年四化，不用大限四化与宫干自化
+
+三条独立证据一致，2026-10-27 定案：
+
+1. `lib/ziwei/patterns.ts` 第 6 行：「倪师立场：不使用宫干自化、大限四化、来因宫等飞星派工具」
+2. `lib/classics/data/quanshu.ts` 四化论：「生年四化为本命四化，永远固定；倪师强调四化星不动，
+   只看大限流年走到何处。北派飞星派之自化、宫干飞化、来因宫等，倪师不主张使用。」
+3. `docs/tianji-ziwei` 1849 条原话统计：宫干 / 自化 / 飞星 / 飞化 / 来因宫 / 大限四化 出现次数均为 0；
+   「四化」仅 5 次，全部指科权禄忌。
+
+落到代码：
+
+- `chart-context.ts` **不再输出** `宫干自化`，也**不再输出** `大限四化` 与该宫天干；
+  大限段落只保留「X-Y 岁，行【某宫】」。排盘层仍计算这些字段（命盘看板要用），只是 AI 上下文不携带。
+- 提示词明确要求：论大限只看「大限走到哪一宫、那一宫本有什么星」，并显式禁止上述飞星派工具。
+- 若日后要改用大限四化，必须同时改这三处，不能只翻提示词。
 
 ## 与官方规范对齐的要点
 

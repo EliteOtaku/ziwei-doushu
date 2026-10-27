@@ -202,24 +202,18 @@ export async function* streamChat(
   messages: ChatMessage[],
   outerSignal?: AbortSignal,
 ): AsyncGenerator<StreamChunk, void, unknown> {
-  // 通道不接受 system role 时（如本地 GLM 反代）折叠进第一条 user 消息。
-  // 这一步必须发生在组装 body 之前，否则上送的就是被上游拒绝的原始结构。
-  const baseMessages = config.supportsSystemRole ? messages : foldSystemIntoUser(messages);
-
-  // 通道级输出约束：追加到**最后一条 user 消息**末尾，作为最近、最强的指令。
-  // 放在末尾而不是开头，是因为模型的注意力更靠后，且不会冲淡产品提示词。
-  let wireMessages = baseMessages;
-  if (config.outputHint) {
-    const lastUser = [...baseMessages].reverse().findIndex(m => m.role === 'user');
-    if (lastUser !== -1) {
-      const idx = baseMessages.length - 1 - lastUser;
-      wireMessages = [...baseMessages];
-      wireMessages[idx] = {
-        role: 'user',
-        content: `${wireMessages[idx].content}\n\n${config.outputHint}`,
-      };
-    }
-  }
+  // 无论通道是否支持 system role，一律折叠进第一条 user 消息。
+  //
+  // 为什么不按通道区分（早先是 supportsSystemRole 开关）：
+  //   1. 提示词里写了「回答分隔线（---）之后的问题」，而 --- 只在折叠时插入。
+  //      一旦某个通道走「原生 system」分支，提示词就在引用一个不存在的东西。
+  //   2. 折叠后所有通道的输入形态完全一致，换模型（GLM / DeepSeek / OpenDesign）
+  //      做效果对比时条件相同，结论才有可比性。
+  //   3. 任何 OpenAI 兼容服务都必然接受 user 消息，折叠是唯一普适形态。
+  //
+  // 代价是损失一点 system 角色的指令权重；若将来实测发现原生长文质量明显更好，
+  // 应连同提示词里的 --- 表述一起改，而不是只翻这一个开关。
+  const wireMessages = foldSystemIntoUser(messages);
 
   const body: Record<string, unknown> = {
     model: config.model,
