@@ -94,11 +94,13 @@
 | `true-solar-time.ts` | 真太阳时校正（经度差 + 均时差） |
 | `dst-cn.ts` | 中国 1986–1991 夏令时 |
 | `lunar-solar.ts` | 农历 / 公历互转与闰月边界 clamp |
-| `school-data.ts` / `school-tables.generated.ts` / `school-config.ts` | 星曜亮度流派数据与对照表、闰月与晚子时口径配置 |
+| `school-data.ts` / `school-tables.generated.ts` / `school-config.ts` | 星曜亮度流派数据与对照表；10 类流派开关的类型、默认值与 URL 序列化 |
+| `school-apply.ts` | 10 类流派开关的实际落星逻辑（对 iztro 排出的基础盘做二次修正） |
+| `star-meta.ts` | 亮度映射与星曜吉煞分类（排盘内核与流派修正共用同一套规则） |
 | `shier-shen.ts` | 十二神煞 |
 | `yunxian-context.ts` | 运限上下文（含童限） |
 
-**2. 补上回归测试与 CI** —— 此前本仓库没有任何测试。现在 5 条排盘回归，`npm test` 一条命令跑完，每次 push 与 PR 在 GitHub Actions 上自动跑。
+**2. 补上回归测试与 CI** —— 此前本仓库没有任何测试。现在 12 条回归（排盘铁律 + 流派开关 + AI 协议解析），`npm test` 一条命令跑完，每次 push 与 PR 在 GitHub Actions 上自动跑。
 
 **3. 修掉样本时辰注释错位**（[#26](https://github.com/Renhuai123/ziwei-doushu/issues/26)）—— `famous.ts` 里 11 条名人样本有 7 条的时辰注释与 `hour` 索引不符（`hour` 一直是**时辰地支索引 0–11**，不是 0–23 的小时数）。已改正并加回归钉住。
 
@@ -284,7 +286,7 @@ npm run dev
 
 ```bash
 npm run typecheck   # TypeScript 全量类型检查
-npm test            # 排盘引擎回归（768 盘 × 紫微铁律、夏令时、立春边界、红鸾天喜、样本时辰一致性、时辰序号边界、日期合法性、同宫双四化）
+npm test            # 排盘引擎回归（768 盘 × 紫微铁律、夏令时、立春边界、红鸾天喜、样本时辰一致性、时辰序号边界、日期合法性、同宫双四化、96 盘 × 10 组流派开关、SSE 分帧解析、AI 协议适配）
 ```
 
 每次 push 与 PR 都会在 GitHub Actions 上跑同一套（见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）。
@@ -335,6 +337,7 @@ MYGATEWAY_MODEL=your-model
 | **晚子时换日** | 23:00–23:59 按次日排盘、00:00–00:59 按本日；换日策略可切换 |
 | **星曜亮度 7 档** | 庙 / 旺 / 得 / 利 / 平 / 不 / 陷，另保留 3 档粗分类做显示降级 |
 | **亮度流派可切换** | 不同流派（含主流排盘软件的不同版本）对辅星亮度判法不一致，做成开关而非写死 |
+| **10 类流派开关** | 亮度表 / 庚年四化 / 安天马 / 安天空 / 截空旬空 / 魁钺 / 天使天伤 / 长生十二神 / 晚子时 / 闰月归属，命盘页右上「排盘流派」抽屉可切，改动即时重排并持久化到本机，分享链接会带上参数 |
 | **四化与飞星** | 生年四化、大限 / 流年四化、飞星自化 |
 | **十二神煞** | 本命层按生年支起，流年层改按流年支起 |
 | **格局判定** | 1100+ 行规则库（紫府同宫、日月并明、七杀朝斗等） |
@@ -351,7 +354,9 @@ MYGATEWAY_MODEL=your-model
 | `types.ts` | TypeScript 类型定义 |
 | `cities.ts` | 中国城市经纬度，用于真太阳时校正 |
 | `famous.ts` | 历史名人命盘示例数据 |
-| `school-data.ts` / `school-tables.generated.ts` / `school-config.ts` | 星曜亮度流派数据与对照表、闰月与晚子时口径配置 |
+| `school-data.ts` / `school-tables.generated.ts` / `school-config.ts` | 星曜亮度流派数据与对照表；10 类流派开关的类型、默认值与 URL 序列化 |
+| `school-apply.ts` | 10 类流派开关的实际落星逻辑（对 iztro 排出的基础盘做二次修正） |
+| `star-meta.ts` | 亮度映射与星曜吉煞分类（排盘内核与流派修正共用同一套规则） |
 | `shier-shen.ts` | 十二神煞（本命按生年支起、流年层按流年支起） |
 | `true-solar-time.ts` | 真太阳时校正（经度差 + 均时差） |
 | `dst-cn.ts` | 中国 1986–1991 夏令时年份与区间 |
